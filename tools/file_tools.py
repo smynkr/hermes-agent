@@ -5,6 +5,7 @@ import errno
 import json
 import logging
 import os
+import tempfile
 import threading
 from pathlib import Path
 
@@ -158,10 +159,23 @@ _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
 def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None:
     """Return an error message if the path targets a sensitive system location."""
     try:
-        resolved = str(_resolve_path_for_task(filepath, task_id))
+        resolved_path = _resolve_path_for_task(filepath, task_id)
+        resolved = str(resolved_path)
     except (OSError, ValueError):
+        resolved_path = None
         resolved = filepath
     normalized = os.path.normpath(os.path.expanduser(filepath))
+
+    # macOS temp files often live under /private/var/folders/... via realpath.
+    # Those are ordinary scratch files, not privileged system config. Allow the
+    # active tempdir subtree explicitly before applying the broad /private/var/
+    # deny prefix.
+    try:
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        if resolved_path is not None and (resolved_path == temp_root or resolved_path.is_relative_to(temp_root)):
+            return None
+    except (OSError, ValueError):
+        pass
     _err = (
         f"Refusing to write to sensitive system path: {filepath}\n"
         "Use the terminal tool with sudo if you need to modify system files."
@@ -1015,16 +1029,99 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
 
 
 
+def _context_lite_lookup_field(payload, field: str):
+    """Resolve a dotted field path inside a dict/list payload."""
+    current = payload
+    for part in field.split("."):
+        if isinstance(current, dict):
+            if part not in current:
+                keys = ", ".join(sorted(map(str, current.keys()))) or "(none)"
+                raise KeyError(f"Field '{field}' not found. Available top-level keys: {keys}")
+            current = current[part]
+            continue
+        if isinstance(current, list):
+            try:
+                index = int(part)
+            except ValueError as exc:
+                raise KeyError(f"Field '{field}' not found. Expected numeric list index at '{part}'.") from exc
+            if index < 0 or index >= len(current):
+                raise KeyError(f"Field '{field}' not found. List index '{part}' is out of range.")
+            current = current[index]
+            continue
+        raise KeyError(f"Field '{field}' not found. '{part}' is not addressable on {type(current).__name__}.")
+    return current
+
+
 # ---------------------------------------------------------------------------
 # Schemas + Registry
 # ---------------------------------------------------------------------------
 from tools.registry import registry, tool_error
 
 
+def context_lite_artifact_tool(
+    *,
+    action: str,
+    task_id: str | None = None,
+    session_key: str | None = None,
+    handle: str | None = None,
+    field: str | None = None,
+    max_chars: int = 4000,
+) -> str:
+    """Inspect context-lite artifacts without re-injecting the full payload."""
+    from tools.context_lite_telemetry import list_session_artifacts, read_artifact
+
+    resolved_max_chars = max(1, int(max_chars or 4000))
+
+    if action == "list":
+        artifacts = list_session_artifacts(task_id=task_id, session_key=session_key, limit=10)
+        return json.dumps({"action": "list", "count": len(artifacts), "artifacts": artifacts}, ensure_ascii=False)
+
+    if action != "read":
+        return tool_error(f"Unknown action '{action}'. Expected 'list' or 'read'.")
+
+    if not handle:
+        return tool_error("Missing required field 'handle' for action='read'.")
+
+    artifact = read_artifact(handle=handle, task_id=task_id, session_key=session_key)
+    if artifact is None:
+        return tool_error(f"Artifact '{handle}' not found.")
+
+    if not field:
+        return json.dumps({"action": "read", "handle": handle, "artifact": artifact}, ensure_ascii=False)
+
+    try:
+        value = _context_lite_lookup_field(artifact, field)
+    except KeyError as exc:
+        return tool_error(str(exc))
+
+    if isinstance(value, str):
+        truncated = len(value) > resolved_max_chars
+        content = value[:resolved_max_chars]
+        value_kind = "string"
+    else:
+        serialized = json.dumps(value, ensure_ascii=False)
+        truncated = len(serialized) > resolved_max_chars
+        content = serialized[:resolved_max_chars]
+        value_kind = type(value).__name__
+
+    return json.dumps(
+        {
+            "action": "read",
+            "handle": handle,
+            "field": field,
+            "value_kind": value_kind,
+            "truncated": truncated,
+            "content": content,
+        },
+        ensure_ascii=False,
+    )
+
+
 def _check_file_reqs():
     """Lazy wrapper to avoid circular import with tools/__init__.py."""
     from tools import check_file_requirements
     return check_file_requirements()
+
 
 READ_FILE_SCHEMA = {
     "name": "read_file",

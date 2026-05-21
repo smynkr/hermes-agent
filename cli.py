@@ -268,6 +268,15 @@ def _parse_service_tier_config(raw: str) -> str | None:
     logger.warning("Unknown service_tier '%s', ignoring", raw)
     return None
 
+
+def _safe_startup_cwd() -> str:
+    """Return a startup cwd even if the process cwd is inaccessible."""
+    try:
+        return os.getcwd()
+    except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
+        return str(Path(__file__).resolve().parent)
+
+
 def load_cli_config() -> Dict[str, Any]:
     """
     Load CLI configuration from config files.
@@ -495,7 +504,7 @@ def load_cli_config() -> Dict[str, Any]:
     effective_backend = terminal_config.get("env_type", "local")
 
     if effective_backend == "local":
-        terminal_config["cwd"] = os.getcwd()
+        terminal_config["cwd"] = _safe_startup_cwd()
         defaults["terminal"]["cwd"] = terminal_config["cwd"]
     elif terminal_config.get("cwd") in _CWD_PLACEHOLDERS:
         terminal_config.pop("cwd", None)
@@ -539,7 +548,7 @@ def load_cli_config() -> Dict[str, Any]:
     for config_key, env_var in env_mappings.items():
         if config_key in terminal_config:
             if env_var == "TERMINAL_CWD":
-                if _is_gateway:
+                if _is_gateway and env_var in os.environ:
                     continue
                 # CLI: always export (overrides stale .env or inherited values)
                 os.environ[env_var] = str(terminal_config[config_key])
