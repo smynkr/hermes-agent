@@ -242,10 +242,11 @@ class TestDefaultContextLengths:
 # =========================================================================
 
 class TestCodexOAuthContextLength:
-    """ChatGPT Codex OAuth imposes lower context limits than the direct
-    OpenAI API for the same slugs. Verified Apr 2026 via live probe of
-    chatgpt.com/backend-api/codex/models: every model returns 272k, while
-    models.dev reports 1.05M for gpt-5.5/gpt-5.4 and 400k for the rest.
+    """Codex OAuth limits are model-specific, unlike the direct OpenAI API.
+
+    GPT-5 Codex models use 272K; OpenAI documents GPT-6.1 Sol's default
+    ChatGPT Work/Codex context window as 500K:
+    https://help.openai.com/en/articles/20001275-chatgpt-work-and-codex
     """
 
     def setup_method(self):
@@ -254,31 +255,31 @@ class TestCodexOAuthContextLength:
         mm._codex_oauth_context_cache_time = 0.0
 
     def test_fallback_table_used_without_token(self):
-        """With no access token, the hardcoded Codex fallback table wins
-        over models.dev (which reports 1.05M for gpt-5.5 but Codex is 272k).
-        """
+        """The Codex-specific fallback must win over direct-API model metadata."""
         from agent.model_metadata import get_model_context_length
+
+        models = (
+            ("gpt-5.5", 272_000),
+            ("gpt-5.4", 272_000),
+            ("gpt-5.4-mini", 272_000),
+            ("gpt-5.3-codex", 272_000),
+            ("gpt-5.2-codex", 272_000),
+            ("gpt-5.1-codex-max", 272_000),
+            ("gpt-5.1-codex-mini", 272_000),
+            ("gpt-6.1-sol", 500_000),
+        )
 
         with patch("agent.model_metadata.get_cached_context_length", return_value=None), \
              patch("agent.model_metadata.save_context_length"):
-            for model in (
-                "gpt-5.5",
-                "gpt-5.4",
-                "gpt-5.4-mini",
-                "gpt-5.3-codex",
-                "gpt-5.2-codex",
-                "gpt-5.1-codex-max",
-                "gpt-5.1-codex-mini",
-            ):
+            for model, expected_ctx in models:
                 ctx = get_model_context_length(
                     model=model,
                     base_url="https://chatgpt.com/backend-api/codex",
                     api_key="",
                     provider="openai-codex",
                 )
-                assert ctx == 272_000, (
-                    f"Codex {model}: expected 272000 fallback, got {ctx} "
-                    "(models.dev leakage?)"
+                assert ctx == expected_ctx, (
+                    f"Codex {model}: expected {expected_ctx} fallback, got {ctx}"
                 )
 
     def test_live_probe_overrides_fallback(self):
@@ -359,11 +360,10 @@ class TestCodexOAuthContextLength:
         )
 
     def test_stale_codex_cache_over_400k_is_invalidated(self, tmp_path, monkeypatch):
-        """Pre-PR #14935 builds cached gpt-5.5 at 1.05M (from models.dev)
-        before the Codex-aware branch existed. Upgrading users keep that
-        stale entry on disk and the cache-first lookup returns it forever.
-        Codex OAuth caps at 272k for every slug, so any cached Codex
-        entry >= 400k must be dropped and re-resolved via the live probe.
+        """A stale direct-API cache for GPT-5.5 must be re-resolved for Codex.
+
+        GPT-5.5's Codex fallback is 272K, so a 1.05M models.dev cache entry
+        left by older builds must be dropped before the live Codex probe.
         """
         from agent import model_metadata as mm
 
@@ -426,6 +426,28 @@ class TestCodexOAuthContextLength:
                 provider="openai-codex",
             )
         assert ctx == 272_000
+        mock_get.assert_not_called()
+
+    def test_sol_cache_at_500k_is_respected(self, tmp_path, monkeypatch):
+        from agent import model_metadata as mm
+
+        cache_file = tmp_path / "context_length_cache.yaml"
+        monkeypatch.setattr(mm, "_get_context_cache_path", lambda: cache_file)
+
+        base_url = "https://chatgpt.com/backend-api/codex/"
+        cache_file.write_text(yaml.dump({"context_lengths": {
+            f"gpt-6.1-sol@{base_url}": 500_000,
+        }}))
+
+        with patch("agent.model_metadata.requests.get") as mock_get:
+            ctx = mm.get_model_context_length(
+                model="gpt-6.1-sol",
+                base_url=base_url,
+                api_key="fake-token",
+                provider="openai-codex",
+            )
+
+        assert ctx == 500_000
         mock_get.assert_not_called()
 
     def test_stale_invalidation_scoped_to_codex_provider(self, tmp_path, monkeypatch):

@@ -1103,6 +1103,8 @@ def _query_anthropic_context_length(model: str, base_url: str, api_key: str) -> 
 # Used as a fallback when the live probe fails (no token, network error).
 # Longest keys first so substring match picks the most specific entry.
 _CODEX_OAUTH_CONTEXT_FALLBACK: Dict[str, int] = {
+    # OpenAI Help Center documents a 500K default for GPT-6.1 Sol in Work/Codex.
+    "gpt-6.1-sol": 500_000,
     "gpt-5.1-codex-max": 272_000,
     "gpt-5.1-codex-mini": 272_000,
     "gpt-5.3-codex": 272_000,
@@ -1293,15 +1295,22 @@ def get_model_context_length(
     if base_url and provider != "lmstudio":
         cached = get_cached_context_length(model, base_url)
         if cached is not None:
-            # Invalidate stale Codex OAuth cache entries: pre-PR #14935 builds
-            # resolved gpt-5.x to the direct-API value (e.g. 1.05M) via
-            # models.dev and persisted it. Codex OAuth caps at 272K for every
-            # slug, so any cached Codex entry at or above 400K is a leftover
-            # from the old resolution path. Drop it and fall through to the
-            # live /models probe in step 5 below.
-            if provider == "openai-codex" and cached >= 400_000:
+            # Older builds persisted direct-API GPT-5 values via models.dev.
+            # Keep invalidating oversized Codex caches except when a model's
+            # documented OAuth context window is at least that large (Sol: 500K).
+            codex_fallback = (
+                _resolve_codex_oauth_context_length(model)
+                if provider == "openai-codex"
+                else None
+            )
+            stale_codex_cache = (
+                provider == "openai-codex"
+                and cached >= 400_000
+                and (codex_fallback is None or cached > codex_fallback)
+            )
+            if stale_codex_cache:
                 logger.info(
-                    "Dropping stale Codex cache entry %s@%s -> %s (pre-fix value); "
+                    "Dropping stale Codex cache entry %s@%s -> %s (above fallback); "
                     "re-resolving via live /models probe",
                     model, base_url, f"{cached:,}",
                 )
