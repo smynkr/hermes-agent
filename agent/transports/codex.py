@@ -76,8 +76,10 @@ class ResponsesApiTransport(ProviderTransport):
         is_codex_backend = params.get("is_codex_backend", False)
         is_xai_responses = params.get("is_xai_responses", False)
 
-        # Resolve reasoning effort
-        reasoning_effort = "medium"
+        # Resolve reasoning effort. Sol's default tier is high; explicit
+        # profile settings below continue to take precedence.
+        model_id = model.rsplit("/", 1)[-1].lower()
+        reasoning_effort = "high" if model_id.startswith("gpt-6.1-sol") else "medium"
         reasoning_enabled = True
         reasoning_config = params.get("reasoning_config")
         if reasoning_config and isinstance(reasoning_config, dict):

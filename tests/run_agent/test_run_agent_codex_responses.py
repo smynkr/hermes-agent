@@ -39,11 +39,11 @@ def _patch_agent_bootstrap(monkeypatch):
     monkeypatch.setattr(run_agent, "check_toolset_requirements", lambda: {})
 
 
-def _build_agent(monkeypatch):
+def _build_agent(monkeypatch, *, model="gpt-5-codex"):
     _patch_agent_bootstrap(monkeypatch)
 
     agent = run_agent.AIAgent(
-        model="gpt-5-codex",
+        model=model,
         base_url="https://chatgpt.com/backend-api/codex",
         api_key="codex-token",
         quiet_mode=True,
@@ -311,6 +311,20 @@ def test_build_api_kwargs_codex(monkeypatch):
     assert "timeout" not in kwargs
     assert "max_tokens" not in kwargs
     assert "extra_body" not in kwargs
+
+
+def test_build_api_kwargs_codex_defaults_gpt_6_1_sol_to_high_effort(monkeypatch):
+    agent = _build_agent(monkeypatch, model="gpt-6.1-sol")
+
+    kwargs = agent._build_api_kwargs(
+        [
+            {"role": "system", "content": "You are Hermes."},
+            {"role": "user", "content": "Ping"},
+        ]
+    )
+
+    assert kwargs["model"] == "gpt-6.1-sol"
+    assert kwargs["reasoning"]["effort"] == "high"
 
 
 def test_build_api_kwargs_codex_clamps_minimal_effort(monkeypatch):
