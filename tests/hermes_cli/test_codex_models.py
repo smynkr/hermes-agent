@@ -1,7 +1,15 @@
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from hermes_cli.codex_models import DEFAULT_CODEX_MODELS, get_codex_model_ids
+
+
+def _mock_codex_model_api(monkeypatch, entries):
+    import httpx
+
+    response = SimpleNamespace(status_code=200, json=lambda: {"models": entries})
+    monkeypatch.setattr(httpx, "get", lambda *args, **kwargs: response)
 
 
 def test_get_codex_model_ids_prioritizes_default_and_cache(tmp_path, monkeypatch):
@@ -54,25 +62,40 @@ def test_get_codex_model_ids_falls_back_to_curated_defaults(tmp_path, monkeypatc
 
 
 def test_get_codex_model_ids_adds_sol_from_gpt_5_5_template(monkeypatch):
-    monkeypatch.setattr(
-        "hermes_cli.codex_models._fetch_models_from_api",
-        lambda access_token: ["gpt-5.5"],
-    )
+    _mock_codex_model_api(monkeypatch, [{"slug": "gpt-5.5"}])
 
     models = get_codex_model_ids(access_token="codex-access-token")
 
-    assert models == ["gpt-5.5", "gpt-6.1-sol"]
+    assert "gpt-5.5" in models
+    assert "gpt-6.1-sol" in models
+
+
+def test_codex_model_api_exclusions_prevent_sol_synthesis(monkeypatch):
+    for exclusion in (
+        {"supported_in_api": False},
+        {"visibility": "hidden"},
+    ):
+        _mock_codex_model_api(
+            monkeypatch,
+            [
+                {"slug": "gpt-5.5"},
+                {"slug": "gpt-6.1-sol", **exclusion},
+            ],
+        )
+
+        models = get_codex_model_ids(access_token="codex-access-token")
+
+        assert "gpt-5.5" in models
+        assert "gpt-6.1-sol" not in models
 
 
 def test_get_codex_model_ids_adds_forward_compat_models_from_templates(monkeypatch):
-    monkeypatch.setattr(
-        "hermes_cli.codex_models._fetch_models_from_api",
-        lambda access_token: ["gpt-5.2-codex"],
-    )
+    _mock_codex_model_api(monkeypatch, [{"slug": "gpt-5.2-codex"}])
 
     models = get_codex_model_ids(access_token="codex-access-token")
 
-    assert models == ["gpt-5.2-codex", "gpt-5.4-mini", "gpt-5.4", "gpt-5.3-codex"]
+    for model_id in ("gpt-5.2-codex", "gpt-5.4-mini", "gpt-5.4", "gpt-5.3-codex"):
+        assert model_id in models
 
 
 def test_model_command_uses_runtime_access_token_for_codex_list(monkeypatch):

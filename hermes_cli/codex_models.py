@@ -31,12 +31,14 @@ _FORWARD_COMPAT_TEMPLATE_MODELS: List[tuple[str, tuple[str, ...]]] = [
 ]
 
 
-def _add_forward_compat_models(model_ids: List[str]) -> List[str]:
-    """Add Clawdbot-style synthetic forward-compat Codex models.
+def _add_forward_compat_models(
+    model_ids: List[str], excluded_model_ids: Optional[set[str]] = None
+) -> List[str]:
+    """Add synthetic forward-compatible Codex models unless live data excludes them.
 
     If a newer Codex slug isn't returned by live discovery, surface it when an
-    older compatible template model is present. This mirrors Clawdbot's
-    synthetic catalog / forward-compat behavior for GPT-5 Codex variants.
+    older compatible template model is present. Explicit API exclusions always
+    take precedence over synthetic catalog entries.
     """
     ordered: List[str] = []
     seen: set[str] = set()
@@ -47,6 +49,8 @@ def _add_forward_compat_models(model_ids: List[str]) -> List[str]:
 
     for synthetic_model, template_models in _FORWARD_COMPAT_TEMPLATE_MODELS:
         if synthetic_model in seen:
+            continue
+        if excluded_model_ids and synthetic_model in excluded_model_ids:
             continue
         if any(template in seen for template in template_models):
             ordered.append(synthetic_model)
@@ -73,6 +77,7 @@ def _fetch_models_from_api(access_token: str) -> List[str]:
         return []
 
     sortable = []
+    excluded_model_ids: set[str] = set()
     for item in entries:
         if not isinstance(item, dict):
             continue
@@ -81,16 +86,20 @@ def _fetch_models_from_api(access_token: str) -> List[str]:
             continue
         slug = slug.strip()
         if item.get("supported_in_api") is False:
+            excluded_model_ids.add(slug)
             continue
         visibility = item.get("visibility", "")
         if isinstance(visibility, str) and visibility.strip().lower() in ("hide", "hidden"):
+            excluded_model_ids.add(slug)
             continue
         priority = item.get("priority")
         rank = int(priority) if isinstance(priority, (int, float)) else 10_000
         sortable.append((rank, slug))
 
     sortable.sort(key=lambda x: (x[0], x[1]))
-    return _add_forward_compat_models([slug for _, slug in sortable])
+    return _add_forward_compat_models(
+        [slug for _, slug in sortable], excluded_model_ids
+    )
 
 
 def _read_default_model(codex_home: Path) -> Optional[str]:
@@ -161,7 +170,8 @@ def get_codex_model_ids(access_token: Optional[str] = None) -> List[str]:
     if access_token:
         api_models = _fetch_models_from_api(access_token)
         if api_models:
-            return _add_forward_compat_models(api_models)
+            # Fetch already synthesized compatible models while preserving exclusions.
+            return api_models
 
     # Fall back to local sources
     default_model = _read_default_model(codex_home)
